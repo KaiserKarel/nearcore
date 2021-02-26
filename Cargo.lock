@@ -5526,6 +5526,7 @@ dependencies = [
  "near-evm-runner",
  "near-jsonrpc",
  "near-jsonrpc-client",
+ "near-jsonrpc-primitives",
  "near-logger-utils",
  "near-network",
  "near-primitives",
