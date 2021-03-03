@@ -322,7 +322,7 @@ mod tests {
                                                     ))
                                                     .then(move |res| {
                                                         let res_inner = res.unwrap();
-                                                        if let Ok(Some(query_response)) = res_inner
+                                                        if let Ok(query_response) = res_inner
                                                         {
                                                             if let ViewAccount(
                                                                 view_account_result,
@@ -526,7 +526,7 @@ mod tests {
                                                         ))
                                                         .then(move |res| {
                                                             let res_inner = res.unwrap();
-                                                            if let Ok(Some(query_response)) =
+                                                            if let Ok(query_response) =
                                                                 res_inner
                                                             {
                                                                 if let ViewAccount(
