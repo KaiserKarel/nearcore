@@ -17,7 +17,7 @@ mod test {
     fn warmup() {
         if let Err(_) = std::env::var("NIGHTLY_RUNNER") {
             Command::new("cargo")
-                .args(&["build", "-p", "neard"])
+                .args(&["build", "-p", "neard", "--bin", "neard"])
                 .spawn()
                 .expect("warmup failed")
                 .wait()
