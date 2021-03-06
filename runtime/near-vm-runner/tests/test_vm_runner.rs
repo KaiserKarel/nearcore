@@ -1,18 +1,15 @@
 use near_primitives::hash::hash;
 use near_primitives::runtime::fees::RuntimeFeesConfig;
 use near_vm_logic::mocks::mock_external::MockedExternal;
-use near_vm_logic::{VMConfig, VMContext, VMKind, ProtocolVersion};
-use near_vm_runner::{ContractCaller, ContractCallPrepareRequest};
+use near_vm_logic::{VMConfig, VMContext, VMKind, ProtocolVersion, VMOutcome};
+use near_vm_runner::{ContractCaller, ContractCallPrepareRequest, run_vm_profiled, VMError};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use near_primitives::types::CompiledContractCache;
-use std::ops::Deref;
 use near_vm_logic::profile::ProfileData;
-use near_vm_errors::VMError;
-use near_vm_errors::FunctionCallError::MethodResolveError;
-use near_vm_errors::MethodResolveError::MethodNotFound;
 use near_vm_errors::VMError::FunctionCallError;
+use near_primitives::borsh::BorshSerialize;
 
 const TEST_CONTRACT_1: &'static [u8] = include_bytes!("../tests/res/test_contract_rs.wasm");
 const TEST_CONTRACT_2: &'static [u8] = include_bytes!("../tests/res/test_contract_ts.wasm");
@@ -61,12 +58,38 @@ impl CompiledContractCache for MockCompiledContractCache {
     }
 }
 
-#[test]
-pub fn test_vm_runner() {
+fn test_result(result: (Option<VMOutcome>, Option<VMError>), check_gas: bool) -> (i32, i32) {
+    let mut oks = 0;
+    let mut errs = 0;
+    match result.0 {
+        Some(outcome) => {
+            if check_gas {
+                assert_eq!(outcome.burnt_gas, 11088051921);
+            }
+            oks += 1;
+        },
+        None => {
+        }
+    };
+    match result.1 {
+        Some(err) => match err {
+            FunctionCallError(_) => {
+                errs += 1;
+            },
+            _ => assert!(false, "Unexpected error: {:?}", err),
+        },
+        None => {
+        },
+    }
+    (oks, errs)
+}
+
+fn test_vm_runner(preloaded: bool, vm_kind: VMKind, repeat: i32) {
     let code1 = TEST_CONTRACT_1;
     let code2 = TEST_CONTRACT_2;
-
     let method_name1 = "log_something";
+    let code1_hash = hash(code1);
+    let code2_hash = hash(code2);
 
     let mut fake_external = MockedExternal::new();
 
@@ -75,44 +98,88 @@ pub fn test_vm_runner() {
     let cache: Option<Arc<dyn CompiledContractCache>> = Some(Arc::new(MockCompiledContractCache::default()));
     let fees = RuntimeFeesConfig::default();
     let promise_results = vec![];
-    let mut requests = Vec::new();
-    let mut caller= ContractCaller::new(2);
-    for _ in 0..3 {
-        requests.push(ContractCallPrepareRequest {
-            code_hash: hash(code1),
-            code: code1.to_vec(),
-            vm_config: vm_config.clone(),
-            cache: cache.clone(),
-        });
-       requests.push(ContractCallPrepareRequest {
-            code_hash: hash(code2),
-            code: code2.to_vec(),
-            vm_config: vm_config.clone(),
-            cache: cache.clone(),
-        });
-    }
-    let calls = caller.preload(requests,VMKind::Wasmer0);
     let profile_data = ProfileData::new_disabled();
-    for prepared in &calls {
-        let result = caller.run_preloaded(
-             prepared,
-            method_name1,
-            &mut fake_external,
-            context.clone(),
-            &vm_config,
-            &fees,
-            &promise_results,
-             ProtocolVersion::MAX,
-            profile_data.clone(),
-        );
-        println!("result is {:?}", result);
-        /*match result.1 {
-            Some(err) => {
-                match err => {
-                } => {},
-                _ => assert!(false, "Unexpected error: {?:}", err),
-            },
-            None => {},
-        }*/
+    let mut oks = 0;
+    let mut errs = 0;
+
+    if preloaded {
+        let mut requests = Vec::new();
+        let mut caller = ContractCaller::new(4);
+        for _ in 0..repeat {
+            requests.push(ContractCallPrepareRequest {
+                code_hash: code1_hash,
+                code: code1.to_vec(),
+                vm_config: vm_config.clone(),
+                cache: cache.clone(),
+            });
+            requests.push(ContractCallPrepareRequest {
+                code_hash: code2_hash,
+                code: code2.to_vec(),
+                vm_config: vm_config.clone(),
+                cache: cache.clone(),
+            });
+        }
+        let calls = caller.preload(requests, VMKind::Wasmer0);
+        for prepared in &calls {
+            let result = caller.run_preloaded(
+                prepared,
+                method_name1,
+                &mut fake_external,
+                context.clone(),
+                &vm_config,
+                &fees,
+                &promise_results,
+                ProtocolVersion::MAX,
+                profile_data.clone(),
+            );
+            let (ok, err) = test_result(result, true);
+            oks += ok;
+            errs += err;
+        }
+    } else {
+        for _ in 0..repeat {
+            let result1 = run_vm_profiled(
+                code1_hash.try_to_vec().unwrap(), code1, method_name1, &mut fake_external,
+                context.clone(),
+                &vm_config,
+                &fees,
+                &promise_results,
+                vm_kind,
+                profile_data.clone(),
+                ProtocolVersion::MAX,
+                cache.as_deref(),
+            );
+            let (ok, err) = test_result(result1, false);
+            oks += ok;
+            errs += err;
+            let result2 = run_vm_profiled(
+                code2_hash.try_to_vec().unwrap(), code2, method_name1, &mut fake_external,
+                context.clone(),
+                &vm_config,
+                &fees,
+                &promise_results,
+                vm_kind,
+                profile_data.clone(),
+                ProtocolVersion::MAX,
+                cache.as_deref(),
+            );
+            let (ok, err) = test_result(result2, false);
+            oks += ok;
+            errs += err;
+        }
     }
+
+    assert_eq!(oks, repeat);
+    assert_eq!(errs, repeat);
 }
+
+#[test]
+pub fn test_vm_run_sequential() {
+    test_vm_runner(false, VMKind::Wasmer0, 10000);
+}
+
+#[test]
+pub fn test_vm_run_preloaded() {
+    test_vm_runner(true, VMKind::Wasmer0, 10000);
+}
+

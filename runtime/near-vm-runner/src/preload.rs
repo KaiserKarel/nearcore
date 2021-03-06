@@ -1,19 +1,26 @@
-use threadpool::ThreadPool;
-use near_primitives::hash::CryptoHash;
 use std::sync::Arc;
-use near_vm_errors::VMError;
-use near_primitives::types::CompiledContractCache;
-use near_vm_logic::{VMConfig, VMKind, External, VMContext, ProtocolVersion, VMOutcome};
+use std::sync::mpsc::{channel, Receiver, Sender};
+
+use threadpool::ThreadPool;
+
+use near_primitives::hash::CryptoHash;
 use near_primitives::runtime::fees::RuntimeFeesConfig;
-use near_vm_logic::types::PromiseResult;
+use near_primitives::types::CompiledContractCache;
+use near_vm_errors::VMError;
+use near_vm_logic::{External, ProtocolVersion, VMConfig, VMContext, VMKind, VMOutcome};
 use near_vm_logic::profile::ProfileData;
+use near_vm_logic::types::PromiseResult;
+
 use crate::cache;
-use std::sync::mpsc::{channel, Sender, Receiver};
+use crate::preload::VMModule::Wasmer0;
 use crate::wasmer_runner::run_wasmer_module;
-use std::ops::Deref;
+
+enum VMModule {
+    Wasmer0(wasmer_runtime::Module),
+}
 
 struct VMCallData {
-    wasmer_result: Result<wasmer_runtime::Module, VMError>,
+    result: Result<VMModule, VMError>,
 }
 
 struct CallInner {
@@ -37,10 +44,6 @@ pub struct ContractCallPrepareResult {
 
 pub struct ContractCaller {
     pool: ThreadPool,
-    context: ContractCallContext,
-}
-
-pub struct ContractCallContext {
     prepared: Vec<CallInner>,
 }
 
@@ -48,9 +51,7 @@ impl ContractCaller {
     pub fn new(num_threads: usize) -> ContractCaller {
         ContractCaller {
             pool: ThreadPool::new(num_threads),
-            context: ContractCallContext {
-                prepared: Vec::new(),
-            }
+            prepared: Vec::new(),
         }
     }
 
@@ -61,13 +62,13 @@ impl ContractCaller {
     ) -> Vec<ContractCallPrepareResult> {
         let mut result: Vec<ContractCallPrepareResult> = Vec::new();
         for request in requests {
-            let index = self.context.prepared.len();
+            let index = self.prepared.len();
             let (tx, rx) = channel();
-            self.context.prepared.push(CallInner { rx, });
+            self.prepared.push(CallInner { rx });
             let copy_request = request.clone();
             let tx = tx.clone();
             self.pool.execute(move || {
-                prepare_in_thread(copy_request, tx);
+                prepare_in_thread(copy_request, vm_kind, tx);
             });
             result.push(ContractCallPrepareResult { handle: Some(index), error: None });
         }
@@ -92,12 +93,16 @@ impl ContractCaller {
         }
         match prepared.handle {
             Some(handle) => {
-                let call = self.context.prepared.get(handle).unwrap();
+                let call = self.prepared.get(handle).unwrap();
                 let call_data = call.rx.recv().unwrap();
-                return match call_data.wasmer_result {
+                return match call_data.result {
                     Err(err) => (None, Some(err)),
                     Ok(module) => {
-                        run_wasmer_module(module, method_name, ext, context, vm_config, fees_config, promise_results, profile, current_protocol_version)
+                        match module {
+                            Wasmer0(module) => run_wasmer_module(
+                                module, method_name, ext, context, vm_config, fees_config,
+                                promise_results, profile, current_protocol_version),
+                        }
                     }
                 };
             }
@@ -112,11 +117,15 @@ impl Drop for ContractCaller {
     }
 }
 
-fn prepare_in_thread(request: ContractCallPrepareRequest, tx: Sender<VMCallData>) {
-    let cache = request.cache.as_ref().map(|t| t.deref());
-    let result = cache::wasmer0_cache::compile_module_cached_wasmer(
-        &request.code_hash.0.0, request.code.as_slice(), &request.vm_config, cache);
-    tx.send(VMCallData { wasmer_result: result }).unwrap();
+fn prepare_in_thread(request: ContractCallPrepareRequest, vm_kind: VMKind, tx: Sender<VMCallData>) {
+    let cache = request.cache.as_deref();
+    let result = match vm_kind {
+        VMKind::Wasmer0 => cache::wasmer0_cache::compile_module_cached_wasmer(
+            &request.code_hash.0.0, request.code.as_slice(), &request.vm_config, cache)
+            .map(|module| (VMModule::Wasmer0(module))),
+        _ => panic!("Unsupported VM"),
+    };
+    tx.send(VMCallData { result }).unwrap();
 }
 
 
